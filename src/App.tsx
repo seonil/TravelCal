@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef } from 'react';
+import { useState, useMemo, useRef, useEffect } from 'react';
 import './App.css';
 import type { Participant, Expense, Settlement } from './types';
 
@@ -7,10 +7,13 @@ const formatCurrency = (amount: number) => {
   return new Intl.NumberFormat('ko-KR', { style: 'currency', currency: 'KRW' }).format(amount);
 };
 
+const STORAGE_KEY = 'travelcal_data_v1';
+
 function App() {
   const [step, setStep] = useState<1 | 2 | 3>(1);
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [expenses, setExpenses] = useState<Expense[]>([]);
+  const [isLoaded, setIsLoaded] = useState(false);
 
   // Input states
   const [newName, setNewName] = useState('');
@@ -18,9 +21,35 @@ function App() {
   const [newExpenseAmount, setNewExpenseAmount] = useState('');
   const [newExpenseDesc, setNewExpenseDesc] = useState('');
 
-  // Refs for focus management
+  // Refs
   const amountInputRef = useRef<HTMLInputElement>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
+
+  // Load data on mount
+  useEffect(() => {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      try {
+        const { participants, expenses, step } = JSON.parse(saved);
+        setParticipants(participants || []);
+        setExpenses(expenses || []);
+        setStep(step || 1);
+      } catch (e) {
+        console.error("Failed to load data", e);
+      }
+    }
+    setIsLoaded(true);
+  }, []);
+
+  // Save data on change
+  useEffect(() => {
+    if (!isLoaded) return;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      participants,
+      expenses,
+      step
+    }));
+  }, [participants, expenses, step, isLoaded]);
 
   // Step 1: Add Participant
   const addParticipant = () => {
@@ -40,12 +69,10 @@ function App() {
       alert("At least 2 participants are required to split bills.");
       return;
     }
-    // Default to first participant if not set
     if (!newExpensePayer) {
       setNewExpensePayer(participants[0].id);
     }
     setStep(2);
-    // Use timeout to wait for render
     setTimeout(() => amountInputRef.current?.focus(), 100);
   };
 
@@ -62,11 +89,9 @@ function App() {
     };
     setExpenses([...expenses, newExpense]);
 
-    // Clear valid inputs but keep payer selected for multi-entry
     setNewExpenseAmount('');
     setNewExpenseDesc('');
 
-    // Refocus on amount for rapid entry
     amountInputRef.current?.focus();
   };
 
@@ -85,9 +110,6 @@ function App() {
     const totalSpent = expenses.reduce((sum, e) => sum + e.amount, 0);
     const average = totalSpent / participants.length;
 
-    // Calculate balances: Paid - Average
-    // Positive = Spent more than average (Receives money)
-    // Negative = Spent less than average (Gives money)
     let balances = participants.map(p => {
       const paid = expenses
         .filter(e => e.payerId === p.id)
@@ -100,12 +122,8 @@ function App() {
     });
 
     const results: Settlement[] = [];
-
-    // Copy balances to avoid mutating state derived objects if any
     balances = balances.map(b => ({ ...b }));
 
-    // Sort to facilitate greedy matching: Ascending (Debtors first)
-    // We process until balances are approximately 0
     let loopCount = 0;
     while (loopCount < 100) {
       balances.sort((a, b) => a.balance - b.balance);
@@ -113,12 +131,10 @@ function App() {
       const debtor = balances[0];
       const creditor = balances[balances.length - 1];
 
-      // If smallest balances are approx 0, we are done
       if (Math.abs(debtor.balance) < 1 && Math.abs(creditor.balance) < 1) break;
 
       const amount = Math.min(Math.abs(debtor.balance), creditor.balance);
 
-      // debtor pays creditor 'amount'
       if (amount > 0) {
         results.push({
           fromId: debtor.id,
@@ -136,6 +152,28 @@ function App() {
   }, [participants, expenses]);
 
   const totalTotal = expenses.reduce((sum, e) => sum + e.amount, 0);
+
+  const copyResults = () => {
+    let text = `✈️ Travel Expense Settlement\n\n`;
+    text += `Total Spent: ${formatCurrency(totalTotal)}\n`;
+    text += `Per Person: ${formatCurrency(totalTotal / participants.length)}\n\n`;
+
+    if (settlements.length === 0) {
+      text += "All balanced! No transfers needed.";
+    } else {
+      settlements.forEach(s => {
+        const from = participants.find(p => p.id === s.fromId)?.name;
+        const to = participants.find(p => p.id === s.toId)?.name;
+        text += `${from} ➡️ ${to} : ${formatCurrency(s.amount)}\n`;
+      });
+    }
+
+    navigator.clipboard.writeText(text).then(() => {
+      alert("Settlement copied to clipboard! Ready to paste in KakaoTalk/Messenger.");
+    });
+  };
+
+  if (!isLoaded) return null; // Prevent flash of empty state
 
   return (
     <div className="App">
@@ -223,7 +261,7 @@ function App() {
               <button onClick={addExpense} style={{ whiteSpace: 'nowrap' }}>+ Add</button>
             </div>
             <p style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', marginTop: '0.5rem', margin: 0 }}>
-              * Tip: Ensure the Payer is correct, then type <strong>Amount [Enter] Description [Enter]</strong> to add quickly.
+              * Tip: Type <strong>Amount [Enter] Description [Enter]</strong> to add quickly.
             </p>
           </div>
 
@@ -247,9 +285,6 @@ function App() {
                 </button>
               </div>
             ))}
-            {expenses.length === 0 && (
-              <p style={{ textAlign: 'center', color: 'var(--color-text-muted)' }}>No expenses recorded yet.</p>
-            )}
           </div>
 
           <div style={{ marginTop: '2rem', display: 'flex', justifyContent: 'space-between' }}>
@@ -267,33 +302,34 @@ function App() {
           </p>
 
           <div className="settlement-results">
-            {settlements.length === 0 ? (
-              <p>Everything is balanced! No transfers needed.</p>
-            ) : (
-              settlements.map((s, i) => (
-                <div key={i} className="result-card">
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flex: 1, flexWrap: 'wrap' }}>
-                    <span style={{ fontWeight: 'bold', color: 'var(--color-danger)' }}>{participants.find(p => p.id === s.fromId)?.name}</span>
-                    <span style={{ color: 'var(--color-text-muted)', fontSize: '0.9em' }}>sends</span>
-                    <span style={{ fontWeight: 'bold', color: 'var(--color-success)', fontSize: '1.2em' }}>{participants.find(p => p.id === s.toId)?.name}</span>
-                  </div>
-                  <div className="currency" style={{ color: 'var(--color-text)', fontSize: '1.2em', marginLeft: '1rem' }}>
-                    {formatCurrency(s.amount)}
-                  </div>
+            {settlements.map((s, i) => (
+              <div key={i} className="result-card">
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flex: 1, flexWrap: 'wrap' }}>
+                  <span style={{ fontWeight: 'bold', color: 'var(--color-danger)' }}>{participants.find(p => p.id === s.fromId)?.name}</span>
+                  <span style={{ color: 'var(--color-text-muted)', fontSize: '0.9em' }}>sends</span>
+                  <span style={{ fontWeight: 'bold', color: 'var(--color-success)', fontSize: '1.2em' }}>{participants.find(p => p.id === s.toId)?.name}</span>
                 </div>
-              ))
-            )}
+                <div className="currency" style={{ color: 'var(--color-text)', fontSize: '1.2em', marginLeft: '1rem' }}>
+                  {formatCurrency(s.amount)}
+                </div>
+              </div>
+            ))}
           </div>
 
-          <div style={{ marginTop: '2rem' }}>
-            <button className="secondary" onClick={() => setStep(2)}>← Edit Expenses</button>
-            <button className="danger" onClick={() => {
-              if (confirm('Start over? All data will be lost.')) {
-                setParticipants([]);
-                setExpenses([]);
-                setStep(1);
-              }
-            }} style={{ marginLeft: '1rem' }}>Reset All</button>
+          <div style={{ marginTop: '2rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+            <button onClick={copyResults} style={{ background: 'var(--color-success)' }}>📋 Copy Results to Clipboard</button>
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '1rem' }}>
+              <button className="secondary" onClick={() => setStep(2)}>← Edit Expenses</button>
+              <button className="danger" onClick={() => {
+                if (confirm('Start over? All data will be lost.')) {
+                  setParticipants([]);
+                  setExpenses([]);
+                  setStep(1);
+                  localStorage.removeItem(STORAGE_KEY);
+                }
+              }}>Reset All</button>
+            </div>
           </div>
         </div>
       )}
